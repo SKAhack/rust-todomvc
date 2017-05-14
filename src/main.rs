@@ -1,6 +1,7 @@
-#[macro_use] extern crate webplatform;
+extern crate webplatform;
 extern crate mustache;
 extern crate rustc_serialize;
+extern crate rulid;
 
 use mustache::{MapBuilder};
 use std::rc::Rc;
@@ -14,6 +15,7 @@ const TEMPLATE_TODO: &'static str = include_str!("template-todo.html");
 
 #[derive(RustcEncodable, RustcDecodable, Clone)]
 struct TodoItem {
+    id: String,
     title: String,
     completed: bool,
 }
@@ -28,7 +30,7 @@ impl TodoItem {
 enum TodoState {
     Active,
     Completed,
-    All
+    All,
 }
 
 macro_rules! enclose {
@@ -82,31 +84,38 @@ fn main() {
         }
     }
 
-    // Precompile mustache template for string.
-    let template = mustache::compile_str(TEMPLATE_TODO);
 
     let llist = list.root_ref();
-    let render = Rc::new(enclose! { (todo) move || {
+
+    fn render_todo_item(item: &TodoItem) -> String {
+        // Precompile mustache template for string.
+        let template = mustache::compile_str(TEMPLATE_TODO);
+        let data = MapBuilder::new()
+            .insert_str("id", format!("{}", item.id))
+            .insert_str("checked", if item.completed { "checked" } else { "" })
+            .insert_str("value", item.title.clone())
+            .build();
+        let mut vec = Vec::new();
+        template.render_data(&mut vec, &data);
+
+        String::from_utf8(vec).unwrap()
+    }
+
+    let render = Rc::new(enclose! { (document, todo) move || {
         LocalStorage.set("todos-rust", &json::encode(&todo.borrow().items).unwrap());
 
         llist.html_set("");
 
-        for (i, item) in todo.borrow().items.iter().filter(|&x| {
+        for item in todo.borrow().items.iter().filter(|&x| {
             match todo.borrow().state {
                 TodoState::All => true,
                 TodoState::Active => !x.completed,
                 TodoState::Completed => x.completed,
             }
-        }).enumerate() {
-            let data = MapBuilder::new()
-                .insert_str("id", format!("{}", i))
-                .insert_str("checked", if item.completed { "checked" } else { "" })
-                .insert_str("value", item.title.clone())
-                .build();
-
-            let mut vec = Vec::new();
-            template.render_data(&mut vec, &data);
-            llist.html_append(&String::from_utf8(vec).unwrap());
+        }) {
+            let elm = document.element_create("div").unwrap();
+            elm.html_append(&render_todo_item(item));
+            llist.append(&elm);
         }
 
         let len = todo.borrow().items.iter().filter(|&x| !x.completed).count();
@@ -142,12 +151,23 @@ fn main() {
     list.on("click", enclose! { (todo, render) move |e:Event| {
         let node = e.target.unwrap();
         if node.class_get().contains("destroy") {
-            let id = node.parent().unwrap().parent().unwrap().data_get("id").unwrap().parse::<usize>().unwrap();
-            todo.borrow_mut().items.remove(id);
+            let mut index = 0;
+            let id = node.parent().unwrap().parent().unwrap().data_get("id").unwrap();
+            for (i, item) in todo.borrow().items.iter().enumerate() {
+                if item.id == id {
+                    index = i;
+                }
+            }
+            todo.borrow_mut().items.remove(index);
             render();
         } else if node.class_get().contains("toggle") {
-            let id = node.parent().unwrap().parent().unwrap().data_get("id").unwrap().parse::<usize>().unwrap();
-            todo.borrow_mut().items[id].toggle();
+            let id = node.parent().unwrap().parent().unwrap().data_get("id").unwrap();
+            for item in todo.borrow_mut().items.iter_mut() {
+                if item.id == id {
+                    item.toggle();
+                    break;
+                }
+            }
             render();
         }
     } });
@@ -163,8 +183,13 @@ fn main() {
     list.captured_on("blur", enclose! { (todo, render) move |e:Event| {
         let node = e.target.unwrap();
         if node.class_get().contains("edit") {
-            let id = node.parent().unwrap().data_get("id").unwrap().parse::<usize>().unwrap();
-            todo.borrow_mut().items[id].title = node.prop_get_str("value");
+            let id = node.parent().unwrap().data_get("id").unwrap();
+            for item in todo.borrow_mut().items.iter_mut() {
+                if item.id == id {
+                    item.title = node.prop_get_str("value");
+                    break;
+                }
+            }
             render();
         }
     } });
@@ -180,6 +205,7 @@ fn main() {
         t1.prop_set_str("value", "");
 
         todo.borrow_mut().items.push(TodoItem {
+            id: rulid::ulid(),
             title: value,
             completed: false,
         });
